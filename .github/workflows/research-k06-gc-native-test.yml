@@ -1,0 +1,100 @@
+name: "Research K06 — Native Kokkos Random Pool on public GC"
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "research/k06-gc/**"
+      - ".github/workflows/research-k06-gc-native-test.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: kokkos-k06-gc-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  native-kokkos-public-api:
+    name: Native OpenMP Kokkos 5.3.0 / ASan / GPU gate
+    runs-on: ubuntu-24.04
+    timeout-minutes: 28
+    env:
+      OMP_NUM_THREADS: "4"
+      OMP_DYNAMIC: "FALSE"
+      ASAN_OPTIONS: "halt_on_error=1:detect_leaks=0:abort_on_error=1:print_stacktrace=1"
+    steps:
+      - uses: actions/checkout@v4
+      - name: GPU hardware / driver inventory
+        shell: bash
+        run: |
+          mkdir -p research/k06-gc/ci-logs
+          {
+            echo "GPU_GUARD: native CUDA/HIP proof requires a physical GPU";
+            echo "RUNNER: $RUNNER_NAME $RUNNER_OS";
+            echo "--- NVIDIA ---";
+            if command -v nvidia-smi; then nvidia-smi -L; else echo "nvidia-smi unavailable"; fi
+            echo "--- AMD ---";
+            if command -v rocm-smi; then rocm-smi; else echo "rocm-smi unavailable"; fi
+            echo "--- PCI GPU ---";
+            (lspci | grep -Ei 'vga|3d|nvidia|amd' || true)
+            echo "--- device files ---";
+            ls /dev/nvidia* /dev/kfd /dev/dri/renderD* 2>&1 || true
+          } 2>&1 | tee research/k06-gc/ci-logs/gpu-availability.log
+      - uses: actions/checkout@v4
+        with:
+          repository: kokkos/kokkos
+          ref: 5.3.0
+          path: upstream-kokkos-v5.3.0
+          persist-credentials: false
+      - name: Build unmodified Kokkos 5.3.0 with OpenMP
+        shell: bash
+        run: |
+          cmake -S upstream-kokkos-v5.3.0 -B build/kokkos \
+            -DCMAKE_BUILD_TYPE=RelWithDebInfo \
+            -DCMAKE_CXX_COMPILER=g++ \
+            -DCMAKE_INSTALL_PREFIX="$GITHUB_WORKSPACE/install" \
+            -DKokkos_ENABLE_OPENMP=ON -DKokkos_ENABLE_SERIAL=ON \
+            -DKokkos_ENABLE_TESTS=OFF -DKokkos_ENABLE_EXAMPLES=OFF
+          cmake --build build/kokkos --parallel 2
+          cmake --install build/kokkos
+      - name: Compile actual native Kokkos public-API reproduction with ASan
+        shell: bash
+        run: |
+          cmake -S research/k06-gc -B build/k06 \
+            -DCMAKE_BUILD_TYPE=RelWithDebInfo \
+            -DCMAKE_CXX_COMPILER=g++ \
+            -DCMAKE_PREFIX_PATH="$GITHUB_WORKSPACE/install"
+          cmake --build build/k06 --parallel 2
+      - name: Run standard and undersized pools (separate isolated processes)
+        shell: bash
+        run: |
+          set -u
+          mkdir -p research/k06-gc/ci-logs
+          echo 'Native OpenMP CPU test; NOT CUDA/HIP GPU evidence' >> "$GITHUB_STEP_SUMMARY"
+          for states in 4 16 1 2; do
+            echo "--- Kokkos public API: states=$states OMP_NUM_THREADS=$OMP_NUM_THREADS ---"
+            set +e
+            timeout 20s ./build/k06/k06_native_random_pool "$states" 8192 >"research/k06-gc/ci-logs/pool-${states}.log" 2>&1
+            rc=$?
+            set -e
+            head -n 100 "research/k06-gc/ci-logs/pool-${states}.log"
+            echo "K06_NATIVE_EXIT_STATES_${states}=$rc"
+            echo "- Pool states=$states: process exit $rc" >> "$GITHUB_STEP_SUMMARY"
+            if [[ "$states" -eq 4 || "$states" -eq 16 ]]; then
+              if [[ "$rc" -ne 0 ]]; then
+                echo 'Unexpected failure in normal-size control'
+                exit 1
+              fi
+            fi
+          done
+          echo 'GPU native test: NOT_TESTED, unless GPU inventory shows supported device.' >> "$GITHUB_STEP_SUMMARY"
+      - name: Preserve native process / GPU inventory logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: kokkos-k06-gc-openmp-asan
+          path: research/k06-gc/ci-logs/
+          if-no-files-found: warn
+# CI trigger via personal gh token, not GitHub App commit.
