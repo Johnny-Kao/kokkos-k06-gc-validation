@@ -1,0 +1,8 @@
+cmake_minimum_required(VERSION 3.25)
+project(K06NativeKokkosRandomPool LANGUAGES CXX)
+find_package(Kokkos CONFIG REQUIRED)
+add_executable(k06_native_random_pool actual_kokkos_pool.cpp)
+target_compile_features(k06_native_random_pool PRIVATE cxx_std_20)
+target_link_libraries(k06_native_random_pool PRIVATE Kokkos::kokkos)
+target_compile_options(k06_native_random_pool PRIVATE -O1 -g -fno-omit-frame-pointer -fsanitize=address)
+target_link_options(k06_native_random_pool PRIVATE -fsanitize=address)
